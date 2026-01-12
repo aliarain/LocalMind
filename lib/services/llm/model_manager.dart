@@ -3,23 +3,31 @@ import 'dart:io';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:dio/dio.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'llm_service.dart';
+import '../huggingface/huggingface_api.dart';
+import '../huggingface/hf_model.dart';
 
 /// Manages model downloads, storage, and availability
 class ModelManager {
+  static const String _lastModelKey = 'last_selected_model';
+
   final Dio _dio;
   final DeviceInfoPlugin _deviceInfo;
+  final HuggingFaceAPI _hfApi;
 
   String? _modelsDirectory;
+  int? _cachedDeviceRamMB;
   final Map<String, ModelInfo> _availableModels = {};
   final Map<String, double> _downloadProgress = {};
 
   final _progressController = StreamController<Map<String, double>>.broadcast();
   Stream<Map<String, double>> get downloadProgress => _progressController.stream;
 
-  ModelManager({Dio? dio, DeviceInfoPlugin? deviceInfo})
+  ModelManager({Dio? dio, DeviceInfoPlugin? deviceInfo, HuggingFaceAPI? hfApi})
       : _dio = dio ?? Dio(),
-        _deviceInfo = deviceInfo ?? DeviceInfoPlugin();
+        _deviceInfo = deviceInfo ?? DeviceInfoPlugin(),
+        _hfApi = hfApi ?? HuggingFaceAPI();
 
   /// Initialize model manager and scan for available models
   Future<void> initialize() async {
@@ -312,5 +320,201 @@ class ModelManager {
 
   Future<void> dispose() async {
     await _progressController.close();
+  }
+
+  // ============================================
+  // HuggingFace Integration Methods
+  // ============================================
+
+  /// Get HuggingFace API instance for external use
+  HuggingFaceAPI get hfApi => _hfApi;
+
+  /// Search for GGUF models on HuggingFace
+  Future<List<HFModel>> searchHuggingFaceModels({
+    String? query,
+    int limit = 20,
+  }) async {
+    return _hfApi.searchGGUFModels(query: query, limit: limit);
+  }
+
+  /// Get model details including GGUF files
+  Future<HFModelWithFiles> getHFModelDetails(String modelId) async {
+    return _hfApi.getModelDetails(modelId);
+  }
+
+  /// Get recommended mobile-friendly models from HuggingFace
+  Future<List<HFModelWithFiles>> getRecommendedHFModels() async {
+    return _hfApi.getRecommendedMobileModels();
+  }
+
+  /// Search HuggingFace with full details (slower but complete)
+  Future<List<HFModelWithFiles>> searchWithDetails({
+    String? query,
+    int limit = 10,
+    int? maxSizeMB,
+  }) async {
+    return _hfApi.searchWithDetails(
+      query: query,
+      limit: limit,
+      maxSizeMB: maxSizeMB,
+    );
+  }
+
+  /// Add a model from HuggingFace to our available models
+  Future<void> addModelFromHF(HFModelWithFiles hfModel, HFModelFile file) async {
+    final modelId = _generateModelId(hfModel.model.modelId, file.fileName);
+    final downloadUrl = _hfApi.getDownloadUrl(hfModel.model.modelId, file.fileName);
+
+    final estimatedRam = RAMEstimator.estimateRamMB(file.sizeBytes, file.quantization);
+
+    _availableModels[modelId] = ModelInfo(
+      id: modelId,
+      name: '${hfModel.model.displayName} (${file.quantization ?? "GGUF"})',
+      path: file.fileName,
+      sizeBytes: file.sizeBytes,
+      requiredRamMB: estimatedRam,
+      downloadUrl: downloadUrl,
+      hfModelId: hfModel.model.modelId,
+    );
+  }
+
+  /// Generate a unique model ID from HF model and file
+  String _generateModelId(String hfModelId, String fileName) {
+    // Create a sanitized ID from the model and file name
+    final sanitizedModel = hfModelId.replaceAll('/', '_').toLowerCase();
+    final sanitizedFile = fileName.replaceAll('.gguf', '').toLowerCase();
+    return '${sanitizedModel}_$sanitizedFile';
+  }
+
+  /// Download a model from HuggingFace
+  Future<void> downloadHFModel(
+    String hfModelId,
+    String fileName, {
+    void Function(double progress)? onProgress,
+    CancelToken? cancelToken,
+  }) async {
+    final downloadUrl = _hfApi.getDownloadUrl(hfModelId, fileName);
+    final modelId = _generateModelId(hfModelId, fileName);
+    final savePath = '$_modelsDirectory/$fileName';
+
+    try {
+      _downloadProgress[modelId] = 0;
+      _progressController.add(Map.from(_downloadProgress));
+
+      await _dio.download(
+        downloadUrl,
+        savePath,
+        cancelToken: cancelToken,
+        onReceiveProgress: (received, total) {
+          if (total != -1) {
+            final progress = received / total;
+            _downloadProgress[modelId] = progress;
+            _progressController.add(Map.from(_downloadProgress));
+            onProgress?.call(progress);
+          }
+        },
+      );
+
+      // Get file size and update model info
+      final file = File(savePath);
+      final fileSize = await file.length();
+
+      // If model not already registered, add it
+      if (!_availableModels.containsKey(modelId)) {
+        final quantization = HFModelFile.extractQuantization(fileName);
+        final estimatedRam = RAMEstimator.estimateRamMB(fileSize, quantization);
+
+        _availableModels[modelId] = ModelInfo(
+          id: modelId,
+          name: '$hfModelId ($quantization)',
+          path: fileName,
+          sizeBytes: fileSize,
+          requiredRamMB: estimatedRam,
+          isDownloaded: true,
+          downloadUrl: downloadUrl,
+          hfModelId: hfModelId,
+        );
+      } else {
+        // Update existing model as downloaded
+        final existing = _availableModels[modelId]!;
+        _availableModels[modelId] = ModelInfo(
+          id: existing.id,
+          name: existing.name,
+          path: existing.path,
+          sizeBytes: fileSize,
+          requiredRamMB: existing.requiredRamMB,
+          isBundled: existing.isBundled,
+          isDownloaded: true,
+          downloadUrl: existing.downloadUrl,
+          hfModelId: existing.hfModelId,
+        );
+      }
+
+      _downloadProgress.remove(modelId);
+      _progressController.add(Map.from(_downloadProgress));
+    } catch (e) {
+      _downloadProgress.remove(modelId);
+      _progressController.add(Map.from(_downloadProgress));
+
+      // Clean up partial download
+      final file = File(savePath);
+      if (await file.exists()) {
+        await file.delete();
+      }
+      rethrow;
+    }
+  }
+
+  /// Get device RAM (cached for performance)
+  Future<int> getCachedDeviceRamMB() async {
+    _cachedDeviceRamMB ??= await getDeviceRamMB();
+    return _cachedDeviceRamMB!;
+  }
+
+  /// Check if a model can run on this device
+  Future<bool> canRunModel(int requiredRamMB) async {
+    final deviceRam = await getCachedDeviceRamMB();
+    final compatibility = RAMEstimator.checkCompatibility(requiredRamMB, deviceRam);
+    return compatibility != ModelCompatibility.incompatible;
+  }
+
+  /// Get compatibility status for a model
+  Future<ModelCompatibility> getModelCompatibility(int requiredRamMB) async {
+    final deviceRam = await getCachedDeviceRamMB();
+    return RAMEstimator.checkCompatibility(requiredRamMB, deviceRam);
+  }
+
+  /// Get list of compatible models only
+  Future<List<ModelInfo>> getCompatibleModels() async {
+    final deviceRam = await getCachedDeviceRamMB();
+    return _availableModels.values.where((model) {
+      final compatibility = RAMEstimator.checkCompatibility(
+        model.requiredRamMB,
+        deviceRam,
+      );
+      return compatibility != ModelCompatibility.incompatible;
+    }).toList();
+  }
+
+  /// Save last selected model ID
+  Future<void> saveLastSelectedModel(String modelId) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_lastModelKey, modelId);
+  }
+
+  /// Get last selected model ID
+  Future<String?> getLastSelectedModel() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_lastModelKey);
+  }
+
+  /// Check if any model is available to use
+  bool hasAnyReadyModel() {
+    return _availableModels.values.any((m) => m.isDownloaded || m.isBundled);
+  }
+
+  /// Get all available models (both downloaded and downloadable)
+  List<ModelInfo> getAllModels() {
+    return _availableModels.values.toList();
   }
 }
