@@ -1,17 +1,17 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'llm_service.dart';
 import '../huggingface/huggingface_api.dart';
 import '../huggingface/hf_model.dart';
 
 /// Manages model downloads, storage, and availability
 class ModelManager {
-  static const String _lastModelKey = 'last_selected_model';
+  static const String _prefsFileName = 'model_prefs.json';
 
   final Dio _dio;
   final DeviceInfoPlugin _deviceInfo;
@@ -363,7 +363,7 @@ class ModelManager {
 
   /// Add a model from HuggingFace to our available models
   Future<void> addModelFromHF(HFModelWithFiles hfModel, HFModelFile file) async {
-    final modelId = _generateModelId(hfModel.model.modelId, file.fileName);
+    final modelId = generateModelId(hfModel.model.modelId, file.fileName);
     final downloadUrl = _hfApi.getDownloadUrl(hfModel.model.modelId, file.fileName);
 
     final estimatedRam = RAMEstimator.estimateRamMB(file.sizeBytes, file.quantization);
@@ -396,7 +396,7 @@ class ModelManager {
     CancelToken? cancelToken,
   }) async {
     final downloadUrl = _hfApi.getDownloadUrl(hfModelId, fileName);
-    final modelId = _generateModelId(hfModelId, fileName);
+    final modelId = generateModelId(hfModelId, fileName);
     final savePath = '$_modelsDirectory/$fileName';
 
     try {
@@ -498,24 +498,47 @@ class ModelManager {
     }).toList();
   }
 
-  /// Save last selected model ID
+  /// Get the preferences file path
+  Future<File> _getPrefsFile() async {
+    final appDir = await getApplicationDocumentsDirectory();
+    return File('${appDir.path}/$_prefsFileName');
+  }
+
+  /// Save last selected model ID (using file-based storage for reliability)
   Future<void> saveLastSelectedModel(String modelId) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_lastModelKey, modelId);
+      final file = await _getPrefsFile();
+      Map<String, dynamic> prefs = {};
+
+      // Read existing prefs if file exists
+      if (await file.exists()) {
+        try {
+          final content = await file.readAsString();
+          prefs = jsonDecode(content) as Map<String, dynamic>;
+        } catch (_) {
+          // File corrupted, start fresh
+        }
+      }
+
+      prefs['last_selected_model'] = modelId;
+      await file.writeAsString(jsonEncode(prefs));
     } catch (e) {
-      // SharedPreferences not available, silently fail
       debugPrint('Failed to save last selected model: $e');
     }
   }
 
-  /// Get last selected model ID
+  /// Get last selected model ID (using file-based storage for reliability)
   Future<String?> getLastSelectedModel() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      return prefs.getString(_lastModelKey);
+      final file = await _getPrefsFile();
+      if (!await file.exists()) {
+        return null;
+      }
+
+      final content = await file.readAsString();
+      final prefs = jsonDecode(content) as Map<String, dynamic>;
+      return prefs['last_selected_model'] as String?;
     } catch (e) {
-      // SharedPreferences not available, return null
       debugPrint('Failed to get last selected model: $e');
       return null;
     }

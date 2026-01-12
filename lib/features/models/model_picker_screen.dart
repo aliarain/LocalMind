@@ -5,6 +5,21 @@ import '../../services/llm/llm_service.dart';
 import '../../services/huggingface/hf_model.dart';
 import 'widgets/model_card.dart';
 
+/// Track active download info
+class _DownloadInfo {
+  final String modelName;
+  final String fileName;
+  final int totalBytes;
+  final DateTime startTime;
+
+  _DownloadInfo({
+    required this.modelName,
+    required this.fileName,
+    required this.totalBytes,
+    required this.startTime,
+  });
+}
+
 /// Screen for browsing, downloading, and selecting models
 class ModelPickerScreen extends StatefulWidget {
   final ModelManager modelManager;
@@ -40,6 +55,7 @@ class _ModelPickerScreenState extends State<ModelPickerScreen>
 
   // Download tracking
   final Map<String, CancelToken> _downloadTokens = {};
+  final Map<String, _DownloadInfo> _activeDownloads = {};
 
   @override
   void initState() {
@@ -117,10 +133,25 @@ class _ModelPickerScreenState extends State<ModelPickerScreen>
     }
   }
 
+  /// Get the progress key that matches model_manager
+  String _getProgressKey(String hfModelId, String fileName) {
+    return widget.modelManager.generateModelId(hfModelId, fileName);
+  }
+
   Future<void> _downloadModel(HFModelWithFiles model, HFModelFile file) async {
-    final key = '${model.model.modelId}/${file.fileName}';
+    final key = _getProgressKey(model.model.modelId, file.fileName);
     final cancelToken = CancelToken();
     _downloadTokens[key] = cancelToken;
+
+    // Track download info
+    setState(() {
+      _activeDownloads[key] = _DownloadInfo(
+        modelName: model.model.displayName,
+        fileName: file.fileName,
+        totalBytes: file.sizeBytes,
+        startTime: DateTime.now(),
+      );
+    });
 
     try {
       await widget.modelManager.downloadHFModel(
@@ -130,35 +161,87 @@ class _ModelPickerScreenState extends State<ModelPickerScreen>
       );
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Downloaded ${model.model.displayName}'),
-            backgroundColor: Colors.green,
-          ),
-        );
-        // Refresh local models
+        // Remove from active downloads
         setState(() {
+          _activeDownloads.remove(key);
           _localModels = widget.modelManager.getReadyModels();
         });
+
+        // Show completion dialog
+        _showDownloadCompleteDialog(model.model.displayName, key);
       }
     } catch (e) {
-      if (mounted && !cancelToken.isCancelled) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Download failed: $e'),
-            backgroundColor: Theme.of(context).colorScheme.error,
-          ),
-        );
+      if (mounted) {
+        setState(() {
+          _activeDownloads.remove(key);
+        });
+
+        if (!cancelToken.isCancelled) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Download failed: $e'),
+              backgroundColor: Theme.of(context).colorScheme.error,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
       }
     } finally {
       _downloadTokens.remove(key);
     }
   }
 
+  void _showDownloadCompleteDialog(String modelName, String modelId) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        icon: const Icon(Icons.check_circle, color: Colors.green, size: 48),
+        title: const Text('Download Complete!'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              modelName,
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Model is ready to use. Would you like to select it now?',
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Later'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _selectModel(modelId);
+            },
+            child: const Text('Use Now'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _cancelDownload(String modelId, String fileName) {
-    final key = '$modelId/$fileName';
+    final key = _getProgressKey(modelId, fileName);
     _downloadTokens[key]?.cancel();
     _downloadTokens.remove(key);
+    setState(() {
+      _activeDownloads.remove(key);
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Download cancelled')),
+    );
   }
 
   Future<void> _selectModel(String modelId) async {
@@ -227,8 +310,11 @@ class _ModelPickerScreenState extends State<ModelPickerScreen>
       ),
       body: Column(
         children: [
+          // Active downloads banner
+          _buildActiveDownloadsBanner(),
+
           // Device info banner
-          if (_deviceRamMB != null)
+          if (_deviceRamMB != null && _activeDownloads.isEmpty)
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -299,6 +385,136 @@ class _ModelPickerScreenState extends State<ModelPickerScreen>
         ],
       ),
     );
+  }
+
+  /// Build the active downloads banner
+  Widget _buildActiveDownloadsBanner() {
+    return StreamBuilder<Map<String, double>>(
+      stream: widget.modelManager.downloadProgress,
+      builder: (context, snapshot) {
+        final progress = snapshot.data ?? {};
+
+        if (_activeDownloads.isEmpty) {
+          return const SizedBox.shrink();
+        }
+
+        return Container(
+          width: double.infinity,
+          color: Theme.of(context).colorScheme.primaryContainer,
+          child: Column(
+            children: _activeDownloads.entries.map((entry) {
+              final key = entry.key;
+              final info = entry.value;
+              final downloadProgress = progress[key] ?? 0.0;
+              final downloadedBytes = (downloadProgress * info.totalBytes).toInt();
+
+              // Calculate speed
+              final elapsed = DateTime.now().difference(info.startTime);
+              final speedBps = elapsed.inSeconds > 0
+                  ? downloadedBytes / elapsed.inSeconds
+                  : 0.0;
+
+              return Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Downloading ${info.modelName}',
+                                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                '${_formatBytes(downloadedBytes)} / ${_formatBytes(info.totalBytes)} • ${_formatSpeed(speedBps)}',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ],
+                          ),
+                        ),
+                        Text(
+                          '${(downloadProgress * 100).toStringAsFixed(0)}%',
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                fontWeight: FontWeight.bold,
+                                color: Theme.of(context).colorScheme.primary,
+                              ),
+                        ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          icon: const Icon(Icons.close),
+                          onPressed: () {
+                            final parts = key.split('_');
+                            if (parts.length >= 2) {
+                              // Reconstruct the original model ID and file name
+                              // This is a bit hacky but works
+                              _downloadTokens[key]?.cancel();
+                              _downloadTokens.remove(key);
+                              setState(() {
+                                _activeDownloads.remove(key);
+                              });
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Download cancelled')),
+                              );
+                            }
+                          },
+                          tooltip: 'Cancel download',
+                          iconSize: 20,
+                          visualDensity: VisualDensity.compact,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: downloadProgress,
+                        minHeight: 6,
+                        backgroundColor: Theme.of(context).colorScheme.surface,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }).toList(),
+          ),
+        );
+      },
+    );
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes >= 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+    } else if (bytes >= 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    } else if (bytes >= 1024) {
+      return '${(bytes / 1024).toStringAsFixed(0)} KB';
+    }
+    return '$bytes B';
+  }
+
+  String _formatSpeed(double bytesPerSecond) {
+    if (bytesPerSecond >= 1024 * 1024) {
+      return '${(bytesPerSecond / (1024 * 1024)).toStringAsFixed(1)} MB/s';
+    } else if (bytesPerSecond >= 1024) {
+      return '${(bytesPerSecond / 1024).toStringAsFixed(0)} KB/s';
+    }
+    return '${bytesPerSecond.toStringAsFixed(0)} B/s';
   }
 
   Widget _buildLocalModelsTab() {
@@ -394,14 +610,14 @@ class _ModelPickerScreenState extends State<ModelPickerScreen>
           itemBuilder: (context, index) {
             final model = _recommendedModels[index];
             final file = model.recommendedFile ?? model.ggufFiles.first;
-            final key = '${model.model.modelId}/${file.fileName}';
+            final key = _getProgressKey(model.model.modelId, file.fileName);
 
             return HFModelCard(
               model: model,
               file: file,
               deviceRamMB: _deviceRamMB ?? 4096,
               downloadProgress: progress[key],
-              isDownloading: progress.containsKey(key),
+              isDownloading: _activeDownloads.containsKey(key),
               onDownload: () => _downloadModel(model, file),
               onCancelDownload: () =>
                   _cancelDownload(model.model.modelId, file.fileName),
@@ -492,14 +708,14 @@ class _ModelPickerScreenState extends State<ModelPickerScreen>
                   itemBuilder: (context, index) {
                     final model = _searchResults[index];
                     final file = model.recommendedFile ?? model.ggufFiles.first;
-                    final key = '${model.model.modelId}/${file.fileName}';
+                    final key = _getProgressKey(model.model.modelId, file.fileName);
 
                     return HFModelCard(
                       model: model,
                       file: file,
                       deviceRamMB: _deviceRamMB ?? 4096,
                       downloadProgress: progress[key],
-                      isDownloading: progress.containsKey(key),
+                      isDownloading: _activeDownloads.containsKey(key),
                       onDownload: () => _downloadModel(model, file),
                       onCancelDownload: () =>
                           _cancelDownload(model.model.modelId, file.fileName),
