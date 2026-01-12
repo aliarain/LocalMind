@@ -46,6 +46,8 @@ class ModelInfo {
   final int requiredRamMB;
   final bool isBundled;
   final bool isDownloaded;
+  final String? downloadUrl;
+  final String? hfModelId;
 
   const ModelInfo({
     required this.id,
@@ -55,6 +57,8 @@ class ModelInfo {
     required this.requiredRamMB,
     this.isBundled = false,
     this.isDownloaded = false,
+    this.downloadUrl,
+    this.hfModelId,
   });
 
   String get sizeFormatted {
@@ -64,6 +68,31 @@ class ModelInfo {
       return '${(sizeBytes / (1024 * 1024)).toStringAsFixed(0)} MB';
     }
     return '${(sizeBytes / 1024).toStringAsFixed(0)} KB';
+  }
+
+  /// Create a copy with updated fields
+  ModelInfo copyWith({
+    String? id,
+    String? name,
+    String? path,
+    int? sizeBytes,
+    int? requiredRamMB,
+    bool? isBundled,
+    bool? isDownloaded,
+    String? downloadUrl,
+    String? hfModelId,
+  }) {
+    return ModelInfo(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      path: path ?? this.path,
+      sizeBytes: sizeBytes ?? this.sizeBytes,
+      requiredRamMB: requiredRamMB ?? this.requiredRamMB,
+      isBundled: isBundled ?? this.isBundled,
+      isDownloaded: isDownloaded ?? this.isDownloaded,
+      downloadUrl: downloadUrl ?? this.downloadUrl,
+      hfModelId: hfModelId ?? this.hfModelId,
+    );
   }
 }
 
