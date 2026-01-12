@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:dio/dio.dart';
 import '../../services/llm/model_manager.dart';
 import '../../services/llm/llm_service.dart';
-import '../../services/huggingface/huggingface_api.dart';
 import '../../services/huggingface/hf_model.dart';
 import 'widgets/model_card.dart';
 

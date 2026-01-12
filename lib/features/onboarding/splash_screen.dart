@@ -123,15 +123,33 @@ class _SplashScreenState extends State<SplashScreen> {
         systemPrompt: AppConfig.defaultSystemPrompt,
       );
 
-      // Try to load recommended model
-      try {
-        final recommendedModelId = await modelManager.getRecommendedModelId();
-        await provider.loadModel(recommendedModelId);
-      } catch (e) {
-        // No model available yet - user will need to download
+      // Try to load last selected model, or a ready model
+      String? modelToLoad;
+
+      // First try to get last selected model
+      modelToLoad = await modelManager.getLastSelectedModel();
+
+      // If no last selected, try to get any ready model
+      if (modelToLoad == null) {
+        try {
+          modelToLoad = await modelManager.getRecommendedModelId();
+        } catch (e) {
+          // No model available yet - user will need to download
+        }
+      }
+
+      // Try to load the model if one was found
+      if (modelToLoad != null) {
         setState(() {
-          _statusMessage = 'No model available. Please download one.';
+          _statusMessage = 'Loading AI model...';
+          _progress = 0.9;
         });
+
+        try {
+          await provider.loadModel(modelToLoad);
+        } catch (e) {
+          // Failed to load - user will see model picker
+        }
       }
 
       setState(() {
@@ -139,7 +157,7 @@ class _SplashScreenState extends State<SplashScreen> {
         _progress = 1.0;
       });
 
-      // Navigate to chat screen
+      // Navigate to chat screen (will show model picker if no model loaded)
       if (mounted) {
         await Future.delayed(const Duration(milliseconds: 500));
         Navigator.of(context).pushReplacement(
@@ -148,6 +166,7 @@ class _SplashScreenState extends State<SplashScreen> {
               provider: provider,
               storage: chatStorage,
               optimizationService: optimizationService,
+              modelManager: modelManager,
             ),
           ),
         );
