@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'llm_service.dart';
@@ -379,7 +380,8 @@ class ModelManager {
   }
 
   /// Generate a unique model ID from HF model and file
-  String _generateModelId(String hfModelId, String fileName) {
+  /// This is public so UI can use the same key format for progress tracking
+  String generateModelId(String hfModelId, String fileName) {
     // Create a sanitized ID from the model and file name
     final sanitizedModel = hfModelId.replaceAll('/', '_').toLowerCase();
     final sanitizedFile = fileName.replaceAll('.gguf', '').toLowerCase();
@@ -498,14 +500,25 @@ class ModelManager {
 
   /// Save last selected model ID
   Future<void> saveLastSelectedModel(String modelId) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_lastModelKey, modelId);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_lastModelKey, modelId);
+    } catch (e) {
+      // SharedPreferences not available, silently fail
+      debugPrint('Failed to save last selected model: $e');
+    }
   }
 
   /// Get last selected model ID
   Future<String?> getLastSelectedModel() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_lastModelKey);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getString(_lastModelKey);
+    } catch (e) {
+      // SharedPreferences not available, return null
+      debugPrint('Failed to get last selected model: $e');
+      return null;
+    }
   }
 
   /// Check if any model is available to use
